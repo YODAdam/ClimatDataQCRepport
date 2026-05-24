@@ -1,0 +1,305 @@
+---
+title: "ANAM data Quality report"
+author: "Yoda Adaman"
+format:
+  html:
+    code-fold: true
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  type: "all"
+  Station: 'Kaya'
+  Years:  '2010-2025'
+  Variable: 'RR'
+---
+
+## Continuité des Données
+
+Le tableau ci-dessous synthétise la continuité temporelle et la complétude des relevés climatologiques par station, par paramètre et par année. L'analyse évalue la qualité des séries en croisant l'existence des dates du calendrier avec la validité de la variable observée (`Value`). Pour chaque période, il met en évidence le pourcentage annuel de données manquantes ainsi que la durée et les dates exactes de la plus longue séquence consécutive de pannes ou d'absences de données, permettant ainsi d'identifier rapidement les ruptures majeures de collecte (comme le *gap* de 59 jours observé à Kaya en 2010).
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(gt)
+library(tidyverse)
+data <- read_csv(file = "data/ANAM_data")
+
+
+selectedStations <- params$Station
+selectedParameter <- params$Variable
+YearsParameter <- params$Years
+
+if(nchar(YearsParameter) <= 4) {
+  selectedYear <- as.integer(YearsParameter)
+} else {
+  selectedYear1 <- str_split_i(YearsParameter, '-', i = 1) |> as.integer()
+  selectedYear2 <- str_split_i(YearsParameter, '-', i = 2) |> as.integer()
+}
+
+# Fonction interne optimisée pour renvoyer un résumé par groupe
+
+calculer_metriques_trous <- function(days, months, years, values) {
+  # 1. Reconstitution de toutes les dates observées
+  dates_observees <- as.Date(paste(years, months, days, sep = "-"), format = "%Y-%m-%d")
+  
+  # 2. Une date est considérée "valide" uniquement si la ligne existe ET que Value n'est pas NA
+  dates_valides <- dates_observees[!is.na(dates_observees) & !is.na(values)]
+  
+  # 3. Calendrier théorique complet pour cette année précise
+  annee_courante <- years[1]
+  date_debut_annee <- as.Date(paste0(annee_courante, "-01-01"))
+  date_fin_annee   <- as.Date(paste0(annee_courante, "-12-31"))
+  full_dates <- seq.Date(date_debut_annee, date_fin_annee, by = "day")
+  jours_theoriques <- length(full_dates)
+  
+  # Sécurité : Si aucune date valide n'est trouvée sur toute l'année
+  if (length(dates_valides) == 0) {
+    return(data.frame(
+      pct_manquant = 1.0, # 100% de données manquantes
+      max_gap = jours_theoriques,
+      debut_gap = date_debut_annee,
+      fin_gap = date_fin_annee
+    ))
+  }
+  
+  # 4. Calcul du pourcentage exact basé sur les valeurs valides
+  # (On utilise unique() au cas où il y aurait des doublons de lignes dans vos données brutes)
+  jours_presents <- length(unique(dates_valides))
+  pct_manquant <- (jours_theoriques - jours_presents) / jours_theoriques
+  
+  # 5. Détection du masque de données manquantes (présentes dans le calendrier mais pas dans nos dates valides)
+  missing_mask <- !match(full_dates, dates_valides, nomatch = 0L)
+  
+  # S'il n'y a aucun trou (0% manquant, Value est toujours remplie)
+  if (!any(missing_mask)) {
+    return(data.frame(pct_manquant = pct_manquant, max_gap = 0L, debut_gap = as.Date(NA), fin_gap = as.Date(NA)))
+  }
+  
+  # 6. Analyse des séquences consécutives (rle)
+  sequences <- rle(missing_mask)
+  index_fin <- cumsum(sequences$lengths)
+  index_debut <- index_fin - sequences$lengths + 1
+  
+  trous <- data.frame(
+    debut = full_dates[index_debut],
+    fin = full_dates[index_fin],
+    longueur = sequences$lengths,
+    est_manquant = sequences$values
+  ) %>% filter(est_manquant)
+  
+  # Extraction de la séquence de NA la plus longue
+  le_plus_long <- trous[which.max(trous$longueur), ]
+  
+  return(data.frame(
+    pct_manquant = pct_manquant,
+    max_gap = le_plus_long$longueur,
+    debut_gap = le_plus_long$debut,
+    fin_gap = le_plus_long$fin
+  ))
+}
+
+
+
+
+
+
+
+filteredData <- data |> 
+  filter(Station_name == selectedStations, Parameter == selectedParameter, between(Year, selectedYear1, selectedYear2 ))
+
+# Remplacement de 'mon_dataframe' par le nom réel de votre variable
+rapport_manquants <- filteredData %>%
+  # S'assurer que les mois et jours sont au format texte à deux chiffres (ex: "01" au lieu de "1")
+  mutate(
+    Month = sprintf("%02d", as.numeric(Month)),
+    Day = sprintf("%02d", as.numeric(Day))
+  ) %>%
+  # Regroupement par Station, Paramètre et Année
+  group_by(Station_name, Parameter, Year) %>%
+  # Application de la fonction
+  reframe(calculer_metriques_trous(Day, Month, Year, Value))
+
+
+rapport_manquants %>%
+  # Création du tableau gt avec regroupement par Station et Paramètre
+  gt(groupname_col = c("Station_name", "Parameter")) %>%
+  
+  # Titres de la table
+  tab_header(
+    title = md("**Rapport de Continuité des Données Climatologiques**"),
+    subtitle = "Analyse annuelle des données manquantes et des plus longs gaps consécutifs"
+  ) %>%
+  
+  # Libellés propres pour les colonnes
+  cols_label(
+    Year = "Année",
+    pct_manquant = "% Manquant",
+    max_gap = "Plus Long Gap (Jours)",
+    debut_gap = "Date de Début",
+    fin_gap = "Date de Fin"
+  ) %>%
+  
+  # Formatages des données numériques et dates
+  fmt_integer(columns = Year, use_seps = FALSE) %>%
+  fmt_percent(columns = pct_manquant, decimals = 1) %>%
+  fmt_integer(columns = max_gap) %>%
+  fmt_date(columns = c(debut_gap, fin_gap), date_style = "yMd") %>%
+  
+  # CORRECTION : Gestion propre de l'affichage des valeurs manquantes (NA)
+  sub_missing(
+    columns = c(debut_gap, fin_gap, max_gap),
+    missing_text = "-"
+  ) %>%
+  
+  # Alignements des cellules
+  cols_align(align = "center", columns = c(Year, debut_gap, fin_gap)) %>%
+  cols_align(align = "right", columns = c(pct_manquant, max_gap)) %>%
+  
+  # Design et couleurs conditionnelles (Alerte si un trou dépasse 10 jours)
+  data_color(
+    columns = max_gap,
+    rows = max_gap > 10,
+    direction = "column",
+    fn = function(x) "rgba(222, 45, 38, 0.15)" # Fond rouge très léger pour l'alerte
+  ) %>%
+  
+  # Options de style
+  tab_options(
+    heading.align = "left",
+    column_labels.font.weight = "bold",
+    row_group.font.weight = "bold",
+    row_group.background.color = "#f6f8fa"
+  )
+
+
+```
+
+
+
+
+```{r}
+detect_DateGap <- function(dates) {
+  
+  dates <- na.omit(dates)
+  if (length(dates) < 2) return(as.Date(NA))
+  
+  date_minimum <- min(dates)
+  date_maximum <- max(dates)
+  full_dates <- seq.Date(date_minimum, date_maximum)
+  date_missing <- full_dates[!match(full_dates, dates, nomatch = 0L)]
+  
+  if (length(date_missing) == 0) return(as.Date(NA))
+  return(date_missing)
+}
+
+
+first_ObsDate <- function(dates) {
+  
+  dates <- na.omit(dates)
+  
+  return(min(dates))
+}
+
+
+last_ObsDate <- function(dates) {
+  
+  dates <- na.omit(dates)
+  
+  return(max(dates))
+}
+
+
+detect_MaxDateGap <- function(dates) {
+  dates <- na.omit(dates)
+  if (length(dates) < 2) return(0L)
+  
+  full_dates <- seq.Date(min(dates), max(dates), by = "day")
+  missing_mask <- !match(full_dates, dates, nomatch = 0L)
+  if (!any(missing_mask)) return(0L)
+  sequences <- rle(missing_mask)
+  max_gap <- max(sequences$lengths[sequences$values])
+  
+  return(max_gap)
+}
+
+```
+
+## Pourcentage de donnees manquantes par annees et par mois
+
+Le tableau ci-dessous présente une vue mensuelle détaillée du taux de données manquantes par station climatologique et par année. Ce suivi mensuel permet de localiser précisément la saisonnalité des pertes d'information au cours de l'année. La mise en forme conditionnelle met instantanément en évidence les anomalies majeures et les interruptions totales de signal (comme les taux de 100 % de données manquantes observés en février et mars 2010 à la station de Kaya), facilitant ainsi le ciblage des périodes critiques nécessitant une inspection ou une reconstruction des données.
+
+
+```{r}
+
+library(gt)
+
+
+missing_report <- data |> 
+  filter(Station_name == selectedStations, Parameter == selectedParameter, between(Year, selectedYear1, selectedYear2 )) |> 
+  mutate(
+    MonthName = month.name[as.integer(Month)] |> factor(levels = month.name)
+  ) |> 
+  group_by(Station_name, Year, MonthName) |> 
+  summarise(
+    Missing_Rate = round (sum(is.na(Value))/n(), 2)
+  ) |> 
+  pivot_wider(id_cols = c(Station_name, Year), names_from = MonthName, values_from = Missing_Rate)
+
+
+library(gt)
+library(dplyr)
+
+
+missing_report %>%
+  # 1. Initialisation de gt avec regroupement par station
+  gt(groupname_col = "Station_name") %>%
+  
+  # 2. Ajout de titres professionnels
+  tab_header(
+    title = md("**Missing Data Percentage Report**"),
+    subtitle = "Monthly missing observation rates per climate station"
+  ) %>%
+  
+  # 3. CORRECTION : Format de l'année sans séparateur de milliers
+  fmt_integer(columns = Year, use_seps = FALSE) %>%
+  
+  # 4. Formatage des mois en pourcentages nets
+  fmt_percent(
+    columns = January:December,
+    decimals = 0
+  ) %>%
+  
+  # 5. Ajustement de l'alignement
+  cols_align(align = "center", columns = Year) %>%
+  cols_align(align = "right", columns = January:December) %>%
+  
+  # 6. Style visuel global (Bordures et couleurs de thèmes)
+  tab_options(
+    table.font.name = "Arial",
+    table.border.top.color = "black",
+    table.border.bottom.color = "black",
+    heading.align = "left",
+    row.striping.background_color = "#f9f9f9",
+    row_group.font.weight = "bold",
+    column_labels.font.weight = "bold",
+    column_labels.background.color = "#f2f2f2"
+  ) %>%
+  
+  # 7. Formatage conditionnel en cas de future donnée manquante (Alerte rouge)
+  data_color(
+    columns = January:December,
+    rows = everything(),
+    direction = "column",
+    fn = scales::col_bin(
+      palette = c("white", "#fee0d2", "#de2d26"),
+      domain = c(0, 1),
+      bins = c(0, 0.01, 0.1, 1) # 0% reste blanc, >0% rouge clair, >10% rouge foncé
+    )
+  )
+
+```
+
