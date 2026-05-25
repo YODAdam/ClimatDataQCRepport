@@ -12,9 +12,9 @@ jdbc_driver <- JDBC(
 )
 
 # 3. Définir les informations du serveur distant
-host <- "192.168.1.129"      # IP ou nom de domaine du serveur distant
-port <- "1521"              # Port d'écoute Oracle
-service <- "CLIDATA"           # Nom du service de la base de données distante
+host <- "****"      # IP ou nom de domaine du serveur distant
+port <- "****"              # Port d'écoute Oracle
+service <- "****"           # Nom du service de la base de données distante
 
 # 4. Construire l'URL de connexion (Syntaxe "Thin client" d'Oracle)
 url_connexion <- paste0("jdbc:oracle:thin:@//", host, ":", port, "/", service)
@@ -23,8 +23,8 @@ url_connexion <- paste0("jdbc:oracle:thin:@//", host, ":", port, "/", service)
 con <- dbConnect(
   jdbc_driver,
   url_connexion,
-  user     = "YODA",
-  password = "YODA"
+  user     = "****",
+  password = "****"
 )
 
 # --- VOTRE TRAVAIL SUR LA BASE DE DONNÉES ---
