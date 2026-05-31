@@ -9,18 +9,16 @@ execute:
   warning: false
   message: false
 params:
-  type: "all"
-  Station: 'Kaya'
-  Years:  '2010-2025'
+  type: "none"
+  Station: 'Kaya,Saria,Imasgho,Boulsa,Dori'
+  Years:  '2020-2025'
   Variable: 'RR'
+  Map: 'False'
 ---
-
-## Continuité des Données
-
-Le tableau ci-dessous synthétise la continuité temporelle et la complétude des relevés climatologiques par station, par paramètre et par année. L'analyse évalue la qualité des séries en croisant l'existence des dates du calendrier avec la validité de la variable observée (`Value`). Pour chaque période, il met en évidence le pourcentage annuel de données manquantes ainsi que la durée et les dates exactes de la plus longue séquence consécutive de pannes ou d'absences de données, permettant ainsi d'identifier rapidement les ruptures majeures de collecte (comme le *gap* de 59 jours observé à Kaya en 2010).
 
 
 ```{r}
+
 library(dplyr)
 library(tidyr)
 library(lubridate)
@@ -29,16 +27,46 @@ library(tidyverse)
 data <- read_csv(file = "data/ANAM_data")
 
 
+## managing selected stations ----------------
+## multiple stations separated by comas ,
+
 selectedStations <- params$Station
+
+if (str_detect(selectedStations, pattern = ',')){
+  selectedStations <- str_split_1(selectedStations, pattern = ',')
+  
+} else if (str_detect(selectedStations, pattern = ';')){
+  selectedStations <- str_split_1(selectedStations, pattern = ';')
+  
+} else if (str_detect(selectedStations, pattern = '-')){
+  stations_1 <- str_split_i(selectedStations, pattern = '-', i = 1)
+  stations_2 <- str_split_i(selectedStations, pattern = '-', i = 2)
+  
+  stations_1 = sort(c(stations_1, stations_2))[1]
+  stations_2 = sort(c(stations_1, stations_2))[2]
+  
+  selectedStations <- data |> select(Station_name) |> 
+    filter(between(Station_name, stations_1, stations_2)) |> 
+    pull(Station_name)
+}
+
+## Managing parameters ------------------
+
 selectedParameter <- params$Variable
+
+## Managing years ------------
+
 YearsParameter <- params$Years
 
 if(nchar(YearsParameter) <= 4) {
-  selectedYear <- as.integer(YearsParameter)
+  selectedYear1 <- as.integer(YearsParameter)
+  selectedYear2 <- as.integer(YearsParameter)
+  
 } else {
   selectedYear1 <- str_split_i(YearsParameter, '-', i = 1) |> as.integer()
   selectedYear2 <- str_split_i(YearsParameter, '-', i = 2) |> as.integer()
 }
+
 
 # Fonction interne optimisée pour renvoyer un résumé par groupe
 
@@ -104,12 +132,140 @@ calculer_metriques_trous <- function(days, months, years, values) {
 
 
 
+detect_DateGap <- function(dates) {
+  
+  dates <- na.omit(dates)
+  if (length(dates) < 2) return(as.Date(NA))
+  
+  date_minimum <- min(dates)
+  date_maximum <- max(dates)
+  full_dates <- seq.Date(date_minimum, date_maximum)
+  date_missing <- full_dates[!match(full_dates, dates, nomatch = 0L)]
+  
+  if (length(date_missing) == 0) return(as.Date(NA))
+  return(date_missing)
+}
 
 
+first_ObsDate <- function(dates) {
+  
+  dates <- na.omit(dates)
+  
+  return(min(dates))
+}
 
 
+last_ObsDate <- function(dates) {
+  
+  dates <- na.omit(dates)
+  
+  return(max(dates))
+}
+
+
+detect_MaxDateGap <- function(dates) {
+  dates <- na.omit(dates)
+  if (length(dates) < 2) return(0L)
+  
+  full_dates <- seq.Date(min(dates), max(dates), by = "day")
+  missing_mask <- !match(full_dates, dates, nomatch = 0L)
+  if (!any(missing_mask)) return(0L)
+  sequences <- rle(missing_mask)
+  max_gap <- max(sequences$lengths[sequences$values])
+  
+  return(max_gap)
+}
+
+```
+
+```{r}
 filteredData <- data |> 
-  filter(Station_name == selectedStations, Parameter == selectedParameter, between(Year, selectedYear1, selectedYear2 ))
+  filter(Station_name %in% selectedStations, Parameter == selectedParameter, between(Year, selectedYear1, selectedYear2 ))
+```
+
+## Metadonnees et resumee des informations stations
+
+```{r}
+
+library(gt)
+library(scales)
+
+station_summary <- filteredData |> 
+  mutate(Dates = make_date(Year, Month, Day)) |> 
+  group_by(Station_name, Long, Lat) |> 
+  summarise(
+    missingPercent = mean(is.na(Value)),
+    firstDate = min(Dates[!is.na(Value)]),
+    lastDate = last_ObsDate(Dates[!is.na(Value)])
+  ) |> ungroup()
+
+
+station_summary |> 
+  gt() |> 
+  # 1. Add crisp, descriptive headers
+  tab_header(
+    title = md(glue::glue("**Station Data Completeness Summary: from ", selectedYear1," to ", selectedYear2, "**")),
+    subtitle = "Overview of active periods and data gaps across monitoring stations"
+  ) |> 
+  
+  # 2. Force the exact column order and explicit naming
+  cols_move_to_start(columns = c(Station_name, Long, Lat)) |> 
+  cols_label(
+    Station_name = "Station",
+    Long = "Longitude",
+    Lat = "Latitude",
+    missingPercent = "Missing Data",
+    firstDate = "Record Start",
+    lastDate = "Last Observation"
+  ) |> 
+  
+  # 3. Align text to the left and numbers to the right for clear reading
+  cols_align(align = "left", columns = Station_name) |> 
+  cols_align(align = "right", columns = c(Long, Lat, missingPercent, firstDate, lastDate)) |> 
+  
+  # 4. Format values uniformly
+  fmt_number(columns = c(Long, Lat), decimals = 3) |> 
+  fmt_percent(columns = missingPercent, decimals = 1) |> 
+  fmt_date(columns = c(firstDate, lastDate), date_style = "yMMMEd") |> 
+  
+  # 5. Clean, professional table theme with subtle row lines
+  tab_options(
+    heading.align = "left",
+    table.border.top.style = "none",
+    table.border.bottom.color = "#CBCBCB",
+    table.border.bottom.width = px(2),
+    column_labels.border.bottom.color = "#222222",
+    column_labels.border.bottom.width = px(1.5),
+    table_body.hlines.color = "#E0E0E0",
+    table_body.hlines.style = "solid"
+  ) |> 
+  
+  # 6. Set table font safely
+  opt_table_font(
+    font = list(google_font(name = "Chivo"), "Arial", "sans-serif")
+  ) |> 
+  
+  # 7. Add style to station names
+  tab_style(
+    style = cell_text(weight = "bold", color = "#1a252f"),
+    locations = cells_body(columns = Station_name)
+  ) |> 
+  
+  # 8. Subtle color backdrop for the missing data percentage
+  data_color(
+    columns = missingPercent,
+    palette = c("#ffffff", "red"),
+    domain = c(0, 1)
+  )
+
+```
+
+## Continuité des Données
+
+Le tableau ci-dessous synthétise la continuité temporelle et la complétude des relevés climatologiques par station, par paramètre et par année. L'analyse évalue la qualité des séries en croisant l'existence des dates du calendrier avec la validité de la variable observée (`Value`). Pour chaque période, il met en évidence le pourcentage annuel de données manquantes ainsi que la durée et les dates exactes de la plus longue séquence consécutive de pannes ou d'absences de données, permettant ainsi d'identifier rapidement les ruptures majeures de collecte (comme le *gap* de 59 jours observé à Kaya en 2010).
+
+
+```{r}
 
 # Remplacement de 'mon_dataframe' par le nom réel de votre variable
 rapport_manquants <- filteredData %>%
@@ -180,54 +336,6 @@ rapport_manquants %>%
 
 
 
-
-```{r}
-detect_DateGap <- function(dates) {
-  
-  dates <- na.omit(dates)
-  if (length(dates) < 2) return(as.Date(NA))
-  
-  date_minimum <- min(dates)
-  date_maximum <- max(dates)
-  full_dates <- seq.Date(date_minimum, date_maximum)
-  date_missing <- full_dates[!match(full_dates, dates, nomatch = 0L)]
-  
-  if (length(date_missing) == 0) return(as.Date(NA))
-  return(date_missing)
-}
-
-
-first_ObsDate <- function(dates) {
-  
-  dates <- na.omit(dates)
-  
-  return(min(dates))
-}
-
-
-last_ObsDate <- function(dates) {
-  
-  dates <- na.omit(dates)
-  
-  return(max(dates))
-}
-
-
-detect_MaxDateGap <- function(dates) {
-  dates <- na.omit(dates)
-  if (length(dates) < 2) return(0L)
-  
-  full_dates <- seq.Date(min(dates), max(dates), by = "day")
-  missing_mask <- !match(full_dates, dates, nomatch = 0L)
-  if (!any(missing_mask)) return(0L)
-  sequences <- rle(missing_mask)
-  max_gap <- max(sequences$lengths[sequences$values])
-  
-  return(max_gap)
-}
-
-```
-
 ## Pourcentage de donnees manquantes par annees et par mois
 
 Le tableau ci-dessous présente une vue mensuelle détaillée du taux de données manquantes par station climatologique et par année. Ce suivi mensuel permet de localiser précisément la saisonnalité des pertes d'information au cours de l'année. La mise en forme conditionnelle met instantanément en évidence les anomalies majeures et les interruptions totales de signal (comme les taux de 100 % de données manquantes observés en février et mars 2010 à la station de Kaya), facilitant ainsi le ciblage des périodes critiques nécessitant une inspection ou une reconstruction des données.
@@ -239,7 +347,7 @@ library(gt)
 
 
 missing_report <- data |> 
-  filter(Station_name == selectedStations, Parameter == selectedParameter, between(Year, selectedYear1, selectedYear2 )) |> 
+  filter(Station_name %in% selectedStations, Parameter == selectedParameter, between(Year, selectedYear1, selectedYear2 )) |> 
   mutate(
     MonthName = month.name[as.integer(Month)] |> factor(levels = month.name)
   ) |> 
